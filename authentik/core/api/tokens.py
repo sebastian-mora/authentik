@@ -1,5 +1,6 @@
 """Tokens API Viewset"""
 
+from datetime import datetime
 from typing import Any
 
 from django.utils.timezone import now
@@ -62,29 +63,33 @@ class TokenSerializer(ManagedSerializer, ModelSerializer):
         if attrs.get("intent") not in [TokenIntents.INTENT_API, TokenIntents.INTENT_APP_PASSWORD]:
             raise ValidationError({"intent": f"Invalid intent {attrs.get('intent')}"})
 
-        user: User = attrs.get("user")
 
-        # if the user has USER_ATTRIBUTE_TOKEN_EXPIRING explicitly set to False,
-        # then the token should not be expiring
-        if not user.is_superuser and user.group_attributes(request).get(USER_ATTRIBUTE_TOKEN_EXPIRING, True) is False:
-            attrs["expiring"] = False
-        
-        # Validate that the token's expiration does not exceed the maximum lifetime for the user
-        max_token_lifetime = user.group_attributes(request).get(
-            USER_ATTRIBUTE_TOKEN_MAXIMUM_LIFETIME,
-        )
-        if max_token_lifetime is not None:
-            try:
-                max_token_lifetime_dt = now() + timedelta_from_string(max_token_lifetime)
-            except ValueError:
-                pass
+        actor: User = request.user if request else attrs.get("user")
+        expires = attrs.get("expires", default_token_duration())
+       
+        if not actor.is_superuser:
+            attributes = actor.group_attributes(request)
 
-            expires = attrs.get("expires")
-            self._validate_token_duration(max_token_lifetime, expires)
+            # If the user has a maximum token lifetime set, use that instead of the default
+            max_token_lifetime = attributes.get(USER_ATTRIBUTE_TOKEN_MAXIMUM_LIFETIME, default_token_duration())
+
+            if attrs.get("expiring", True):
+                expires = min(expires, max_token_lifetime)
+
+        # Only expiring tokens carry an expiry: default it when omitted (honoring an explicit
+        # value), and clear it for non-expiring tokens so no stale expiry is shown. The
+        # token-maximum-lifetime ceiling then caps the resulting expiry.
+        if attrs.get("expiring", True):
+            if attrs.get("expires") is None:
+                attrs["expires"] = default_token_duration()
+            if max_token_lifetime is not None:
+                self._validate_token_duration(max_token_lifetime, attrs["expires"])
+        else:
+            attrs["expires"] = None
 
         return attrs
     
-    def _validate_token_duration(self, max_token_lifetime: str, expires: datetime.timedelta | None) -> None:
+    def _validate_token_duration(self, max_token_lifetime: str, expires: datetime | None) -> None:
         try:
             max_token_lifetime_dt = now() + timedelta_from_string(max_token_lifetime)
         except ValueError:

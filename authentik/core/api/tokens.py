@@ -62,33 +62,42 @@ class TokenSerializer(ManagedSerializer, ModelSerializer):
         if attrs.get("intent") not in [TokenIntents.INTENT_API, TokenIntents.INTENT_APP_PASSWORD]:
             raise ValidationError({"intent": f"Invalid intent {attrs.get('intent')}"})
 
-        if attrs.get("intent") == TokenIntents.INTENT_APP_PASSWORD:
-            # user IS in attrs
-            user: User = attrs.get("user")
-            max_token_lifetime = user.group_attributes(request).get(
-                USER_ATTRIBUTE_TOKEN_MAXIMUM_LIFETIME,
-            )
-            max_token_lifetime_dt = default_token_duration()
-            if max_token_lifetime is not None:
-                try:
-                    max_token_lifetime_dt = now() + timedelta_from_string(max_token_lifetime)
-                except ValueError:
-                    pass
+        user: User = attrs.get("user")
+
+        # if the user has USER_ATTRIBUTE_TOKEN_EXPIRING explicitly set to False,
+        # then the token should not be expiring
+        if not user.is_superuser and user.group_attributes(request).get(USER_ATTRIBUTE_TOKEN_EXPIRING, True) is False:
+            attrs["expiring"] = False
+        
+        # Validate that the token's expiration does not exceed the maximum lifetime for the user
+        max_token_lifetime = user.group_attributes(request).get(
+            USER_ATTRIBUTE_TOKEN_MAXIMUM_LIFETIME,
+        )
+        if max_token_lifetime is not None:
+            try:
+                max_token_lifetime_dt = now() + timedelta_from_string(max_token_lifetime)
+            except ValueError:
+                pass
 
             expires = attrs.get("expires")
-            if expires is not None and expires > max_token_lifetime_dt:
-                raise ValidationError(
-                    {
-                        "expires": (
-                            f"Token expires exceeds maximum lifetime ({max_token_lifetime_dt} UTC)."
-                        )
-                    }
-                )
-        elif attrs.get("intent") == TokenIntents.INTENT_API:
-            # For API tokens, expires cannot be overridden
-            attrs["expires"] = default_token_duration()
+            self._validate_token_duration(max_token_lifetime, expires)
 
         return attrs
+    
+    def _validate_token_duration(self, max_token_lifetime: str, expires: datetime.timedelta | None) -> None:
+        try:
+            max_token_lifetime_dt = now() + timedelta_from_string(max_token_lifetime)
+        except ValueError:
+            return
+
+        if expires is not None and expires > max_token_lifetime_dt:
+            raise ValidationError(
+                {
+                    "expires": (
+                        f"Token expires exceeds maximum lifetime ({max_token_lifetime_dt} UTC)."
+                    )
+                }
+            )
 
     class Meta:
         model = Token
